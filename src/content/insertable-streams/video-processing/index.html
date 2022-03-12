@@ -58,12 +58,13 @@
     <div class="box">
         <span>Transform:</span>
         <select id="transformSelector" disabled>
-            <option selected value="webgl">WebGL</option>
+            <option value="webgl">WebGL Wrap</option>
             <option value="canvas2d">Canvas2D</option>
             <option value="noop">Do nothing</option>
             <option value="drop">Drop frames at random</option>
             <option value="delay">Delay all frames by 100ms</option>
             <option value="webcodec">Run frames through WebCodec</option>
+            <option selected value="webgl-blur">WebGL Blur</option>
         </select>
     </div>
     <div class="box">
@@ -99,6 +100,7 @@
 <script src="js/video-source.js" async></script>
 <script src="js/webcodec-transform.js" async></script>
 <script src="js/webgl-transform.js" async></script>
+<script src="js/webgl-blur.js" async></script>
 <script src="js/main.js" async></script>
 
 <script src="../../../js/lib/ga.js"></script>

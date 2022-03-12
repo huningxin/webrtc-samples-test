@@ -1,0 +1,246 @@
+/*
+ *  Copyright (c) 2020 The WebRTC project authors. All Rights Reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree.
+ */
+
+'use strict';
+
+/**
+ * Applies a blur effect using WebGL.
+ * @implements {FrameTransform} in pipeline.js
+ */
+class WebGLBlurTransform { // eslint-disable-line no-unused-vars
+  constructor() {
+    // All fields are initialized in init()
+    /** @private {?OffscreenCanvas} canvas used to create the WebGL context */
+    this.canvas_ = null;
+    /** @private {?WebGL2RenderingContext} */
+    this.gl_ = null;
+    /** @private {?WebGLUniformLocation} location of inSampler */
+    this.sampler_ = null;
+    /** @private {?WebGLProgram} */
+    this.program_ = null;
+    /** @private {?WebGLTexture} input texture */
+    this.texture_ = null;
+
+    this.texture1_ = null;
+    this.texture2_ = null;
+    this.frameBuffer1_ = null;
+    this.frameBuffer2_ = null;
+    /** @private {string} */
+    this.debugPath_ = 'debug.pipeline.frameTransform_';
+    this.size_ = {width: 480, height: 270};
+  }
+  /** @override */
+  async init() {
+    console.log('[WebGLTransform] Initializing WebGL.');
+    this.canvas_ = new OffscreenCanvas(1, 1);
+    const gl = /** @type {?WebGL2RenderingContext} */ (
+      this.canvas_.getContext('webgl2'));
+    if (!gl) {
+      alert(
+          'Failed to create WebGL2 context. Check that WebGL2 is supported ' +
+          'by your browser and hardware.');
+      return;
+    }
+    this.gl_ = gl;
+    const vertexShader = this.loadShader_(gl.VERTEX_SHADER,
+      `#version 300 es
+      precision mediump float;
+      in vec2 a_position;
+      in vec2 a_texCoord;
+      out vec2 v_texCoord;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        v_texCoord = a_texCoord;
+      }`);
+    const fragmentShader = this.loadShader_(gl.FRAGMENT_SHADER,
+      `#version 300 es
+      precision highp float;
+      uniform sampler2D u_inputFrame;
+      uniform vec2 u_texelSize;
+      in vec2 v_texCoord;
+      out vec4 outColor;
+      const float offset[5] = float[](0.0, 1.0, 2.0, 3.0, 4.0);
+      const float weight[5] = float[](0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162);
+      void main() {
+        vec4 centerColor = texture(u_inputFrame, v_texCoord);
+        vec4 frameColor = centerColor * weight[0];
+        for (int i = 1; i < 5; i++) {
+          vec2 offset = vec2(offset[i]) * u_texelSize;
+          vec2 texCoord = v_texCoord + offset;
+          frameColor += texture(u_inputFrame, texCoord) * weight[i];
+          texCoord = v_texCoord - offset;
+          frameColor += texture(u_inputFrame, texCoord) * weight[i];
+        }
+        outColor = vec4(frameColor.rgb + (1.0 - frameColor.a) * centerColor.rgb, 1.0);
+      }`);
+    if (!vertexShader || !fragmentShader) return;
+    // Create the program object
+    const programObject = gl.createProgram();
+    gl.attachShader(programObject, vertexShader);
+    gl.attachShader(programObject, fragmentShader);
+    // Link the program
+    gl.linkProgram(programObject);
+    // Check the link status
+    const linked = gl.getProgramParameter(programObject, gl.LINK_STATUS);
+    if (!linked) {
+      const infoLog = gl.getProgramInfoLog(programObject);
+      gl.deleteProgram(programObject);
+      throw new Error(`Error linking program:\n${infoLog}`);
+    }
+    gl.deleteShader(vertexShader);
+    gl.deleteShader(fragmentShader);
+    this.sampler_ = gl.getUniformLocation(programObject, 'u_inputFrame');
+    this.texelSizeLocation_ = gl.getUniformLocation(programObject, 'u_texelSize');
+    this.program_ = programObject;
+
+    this.attributeSetFloats_('a_position', 2, [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0]);
+    this.attributeSetFloats_('a_texCoord', 2, [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+  
+    // Initialize input texture
+    this.texture_ = this.createTexture_();
+
+    this.texture1_ = this.createTexture_(this.size_.width, this.size_.height);
+    this.texture2_ = this.createTexture_(this.size_.width, this.size_.height);
+  
+    this.frameBuffer1_ = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer1_);
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      this.texture1_,
+      0
+    );
+  
+    this.frameBuffer2_ = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_)
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      this.texture2_,
+      0
+    );
+
+    console.log(
+        '[WebGLTransform] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
+        this.canvas_, `${this.debugPath_}.gl_ =`, this.gl_);
+  }
+
+  /**
+   * Creates and compiles a WebGLShader from the provided source code.
+   * @param {number} type either VERTEX_SHADER or FRAGMENT_SHADER
+   * @param {string} shaderSrc
+   * @return {!WebGLShader}
+   * @private
+   */
+  loadShader_(type, shaderSrc) {
+    const gl = this.gl_;
+    const shader = gl.createShader(type);
+    // Load the shader source
+    gl.shaderSource(shader, shaderSrc);
+    // Compile the shader
+    gl.compileShader(shader);
+    // Check the compile status
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const infoLog = gl.getShaderInfoLog(shader);
+      gl.deleteShader(shader);
+      throw new Error(`Error compiling shader:\n${infoLog}`);
+    }
+    return shader;
+  }
+
+  /**
+   * Sets a floating point shader attribute to the values in arr.
+   * @param {string} attrName the name of the shader attribute to set
+   * @param {number} vsize the number of components of the shader attribute's
+   *   type
+   * @param {!Array<number>} arr the values to set
+   * @private
+   */
+  attributeSetFloats_(attrName, vsize, arr) {
+    const gl = this.gl_;
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.STATIC_DRAW);
+    const attr = gl.getAttribLocation(this.program_, attrName);
+    gl.enableVertexAttribArray(attr);
+    gl.vertexAttribPointer(attr, vsize, gl.FLOAT, false, 0, 0);
+  }
+
+  createTexture_(width = 0, height = 0, internalformat = this.gl_.RGBA8, minFilter = this.gl_.NEAREST, magFilter = this.gl_.NEAREST) {
+    const gl = this.gl_;
+    const texture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter);
+    if (width !== 0 && height !== 0) {
+      gl.texStorage2D(gl.TEXTURE_2D, 1, internalformat, width, height);
+    }
+    return texture;
+  }
+
+  /** @override */
+  async transform(frame, controller) {
+    const gl = this.gl_;
+    if (!gl || !this.canvas_) {
+      frame.close();
+      return;
+    }
+    const width = frame.displayWidth;
+    const height = frame.displayHeight;
+    if (this.canvas_.width !== width || this.canvas_.height !== height) {
+      this.canvas_.width = width;
+      this.canvas_.height = height;
+      gl.viewport(0, 0, width, height);
+    }
+    const timestamp = frame.timestamp;
+    const texelWidth = 1 / this.size_.width;
+    const texelHeight = 1 / this.size_.height;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture_);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+    frame.close();
+    gl.useProgram(this.program_);
+    gl.uniform1i(this.sampler_, 0);
+    
+    for (let i = 0; i < 3; i++) {
+      gl.uniform2f(this.texelSizeLocation_, 0, texelHeight);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer1_);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.texture1_);
+      gl.uniform1i(this.sampler_, 1);
+
+      gl.uniform2f(this.texelSizeLocation_, texelWidth, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    // alpha: 'discard' is needed in order to send frames to a PeerConnection.
+    controller.enqueue(new VideoFrame(this.canvas_, {timestamp, alpha: 'discard'}));
+  }
+
+  /** @override */
+  destroy() {
+    if (this.gl_) {
+      console.log('[WebGLTransform] Forcing WebGL context to be lost.');
+      /** @type {!WEBGL_lose_context} */ (
+        this.gl_.getExtension('WEBGL_lose_context'))
+          .loseContext();
+    }
+  }
+}
