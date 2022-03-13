@@ -8,6 +8,10 @@
 
 'use strict';
 
+var stats = new Stats();
+stats.showPanel(1); // 0: fps, 1: ms, 2: mb, 3+: custom
+document.body.appendChild(stats.dom);
+
 /* global MediaStreamTrackProcessor, MediaStreamTrackGenerator */
 if (typeof MediaStreamTrackProcessor === 'undefined' ||
     typeof MediaStreamTrackGenerator === 'undefined') {
