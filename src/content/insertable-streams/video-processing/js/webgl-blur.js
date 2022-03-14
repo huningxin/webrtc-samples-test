@@ -27,15 +27,17 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
 
     // Resize program
     this.resizeProgram_ = null;
-    this.resizeProgramSampler_ = null;
+    this.resizeProgramInputSampler_ = null;
 
     // Blur program
     this.blurProgram_ = null;
-    this.blurProgramSampler_ = null;
+    this.blurProgramInputSampler_ = null;
+    this.blurProgramSegmentationSampler_ = null;
     this.texelSizeLocation_ = null;
 
     // Resources for blur processing with size
     this.size_ = {width: 513, height: 513};
+    this.segmentationTexture_ = null;
     this.texture1_ = null;
     this.texture2_ = null;
     this.frameBuffer1_ = null;
@@ -72,10 +74,11 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
         outColor = texture(u_inputFrame, v_texCoord);
       }`;
     this.resizeProgram_ = this.createProgram_(vertexShaderSrc, resizeFragmentShaderSrc);
-    this.resizeProgramSampler_ = gl.getUniformLocation(this.resizeProgram_, 'u_inputFrame');
+    this.resizeProgramInputSampler_ = gl.getUniformLocation(this.resizeProgram_, 'u_inputFrame');
     const blurFragmentShaderSrc = `#version 300 es
       precision highp float;
       uniform sampler2D u_inputFrame;
+      uniform highp isampler2D u_inputSegmentation;
       uniform vec2 u_texelSize;
       in vec2 v_texCoord;
       out vec4 outColor;
@@ -83,26 +86,41 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
       const float weight[5] = float[](0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162);
       void main() {
         vec4 centerColor = texture(u_inputFrame, v_texCoord);
-        vec4 frameColor = centerColor * weight[0];
-        for (int i = 1; i < 5; i++) {
-          vec2 offset = vec2(offset[i]) * u_texelSize;
-          vec2 texCoord = v_texCoord + offset;
-          frameColor += texture(u_inputFrame, texCoord) * weight[i];
-          texCoord = v_texCoord - offset;
-          frameColor += texture(u_inputFrame, texCoord) * weight[i];
+        int label = texture(u_inputSegmentation, v_texCoord).r;
+        if (label == 0) {
+          vec4 frameColor = centerColor * weight[0];
+          for (int i = 1; i < 5; i++) {
+            vec2 offset = vec2(offset[i]) * u_texelSize;
+            vec2 texCoord = v_texCoord + offset;
+            frameColor += texture(u_inputFrame, texCoord) * weight[i];
+            texCoord = v_texCoord - offset;
+            frameColor += texture(u_inputFrame, texCoord) * weight[i];
+          }
+          outColor = vec4(frameColor.rgb + (1.0 - frameColor.a) * centerColor.rgb, 1.0);
+        } else {
+          outColor = centerColor;
         }
-        outColor = vec4(frameColor.rgb + (1.0 - frameColor.a) * centerColor.rgb, 1.0);
       }`;
     this.blurProgram_ = this.createProgram_(vertexShaderSrc, blurFragmentShaderSrc);
-    this.blurProgramSampler_ = gl.getUniformLocation(this.blurProgram_, 'u_inputFrame');
+    this.blurProgramInputSampler_ = gl.getUniformLocation(this.blurProgram_, 'u_inputFrame');
+    this.blurProgramSegmentationSampler_ = gl.getUniformLocation(this.blurProgram_, 'u_inputSegmentation');
     this.texelSizeLocation_ = gl.getUniformLocation(this.blurProgram_, 'u_texelSize');
   
     // Initialize input texture
     this.inputTexture_ = this.createTexture_();
+    this.segmentationTexture_ = this.createTexture_(this.size_.width, this.size_.height, gl.R32I);
     this.texture1_ = this.createTexture_(this.size_.width, this.size_.height);
     this.frameBuffer1_ = this.createFramebuffer_(this.texture1_);
     this.texture2_ = this.createTexture_(this.size_.width, this.size_.height);
     this.frameBuffer2_ = this.createFramebuffer_(this.texture2_);
+
+    this.segmentationBuffer_ = new Int32Array(this.size_.width * this.size_.height).fill(0);
+    for (let y = 100; y < this.size_.height - 100; ++y) {
+      for (let x = 100; x < this.size_.width - 100; ++x) {
+        let i = y * this.size_.width + x;
+        this.segmentationBuffer_[i] = 1;
+      }
+    }
 
     console.log(
         '[WebGLTransform] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
@@ -227,7 +245,7 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     // Resize from input texture to texture2
     gl.viewport(0, 0, this.size_.width, this.size_.height);
     gl.useProgram(this.resizeProgram_);
-    gl.uniform1i(this.resizeProgramSampler_, 0);
+    gl.uniform1i(this.resizeProgramInputSampler_, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
@@ -235,17 +253,21 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     const texelWidth = 1 / this.size_.width;
     const texelHeight = 1 / this.size_.height;
     gl.useProgram(this.blurProgram_);
-    gl.activeTexture(gl.TEXTURE1)
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.segmentationTexture_);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.size_.width, this.size_.height, gl.RED_INTEGER, gl.INT, this.segmentationBuffer_);
+    gl.uniform1i(this.blurProgramSegmentationSampler_, 1);
+    gl.activeTexture(gl.TEXTURE2)
     gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
-    gl.uniform1i(this.blurProgramSampler_, 1);
+    gl.uniform1i(this.blurProgramInputSampler_, 2);
     for (let i = 0; i < 3; i++) {
       gl.uniform2f(this.texelSizeLocation_, 0, texelHeight);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer1_);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
-      gl.activeTexture(gl.TEXTURE1)
+      gl.activeTexture(gl.TEXTURE2)
       gl.bindTexture(gl.TEXTURE_2D, this.texture1_);
-      gl.uniform1i(this.blurProgramSampler_, 1);
+      gl.uniform1i(this.blurProgramInputSampler_, 2);
 
       gl.uniform2f(this.texelSizeLocation_, texelWidth, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_);
@@ -257,9 +279,9 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     // Resize from texture2 to canvas
     gl.viewport(0, 0, this.canvas_.width, this.canvas_.height);
     gl.useProgram(this.resizeProgram_);
-    gl.activeTexture(gl.TEXTURE1)
+    gl.activeTexture(gl.TEXTURE2)
     gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
-    gl.uniform1i(this.resizeProgramSampler_, 1);
+    gl.uniform1i(this.resizeProgramInputSampler_, 2);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   
