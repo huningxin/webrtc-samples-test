@@ -42,6 +42,9 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     this.texture2_ = null;
     this.frameBuffer1_ = null;
     this.frameBuffer2_ = null;
+
+    // tfjs deeplab model for segmentation
+    this.deeplab_ = null;
   }
   /** @override */
   async init() {
@@ -97,6 +100,8 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
             frameColor += texture(u_inputFrame, texCoord) * weight[i];
           }
           outColor = vec4(frameColor.rgb + (1.0 - frameColor.a) * centerColor.rgb, 1.0);
+          // green screen
+          // outColor = vec4(0.0, 1.0, 0.0, 1.0);
         } else {
           outColor = centerColor;
         }
@@ -114,13 +119,9 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     this.texture2_ = this.createTexture_(this.size_.width, this.size_.height);
     this.frameBuffer2_ = this.createFramebuffer_(this.texture2_);
 
-    this.segmentationBuffer_ = new Int32Array(this.size_.width * this.size_.height).fill(0);
-    for (let y = 100; y < this.size_.height - 100; ++y) {
-      for (let x = 100; x < this.size_.width - 100; ++x) {
-        let i = y * this.size_.width + x;
-        this.segmentationBuffer_[i] = 1;
-      }
-    }
+    // Load deeplab model
+    this.deeplab_ = await tf.loadGraphModel('../../../tfjs-models/deeplab_pascal_1_default_1/model.json');
+    console.log('DeepLab model loaded', this.deeplab_);
 
     console.log(
         '[WebGLTransform] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
@@ -240,7 +241,6 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     gl.bindTexture(gl.TEXTURE_2D, this.inputTexture_);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
-    frame.close();
 
     // Resize from input texture to texture2
     gl.viewport(0, 0, this.size_.width, this.size_.height);
@@ -248,6 +248,18 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     gl.uniform1i(this.resizeProgramInputSampler_, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+    // Segmentation
+    const videoBitmap = await createImageBitmap(frame, {resizeWidth: this.size_.width, resizeHeight: this.size_.height});
+    const resultTensor = tf.tidy(() => {
+      let inputTensor = tf.browser.fromPixels(videoBitmap);
+      const inputShape = inputTensor.shape;
+      inputShape.unshift(1);
+      inputTensor = inputTensor.reshape(inputShape);
+      return this.deeplab_.predict(inputTensor);
+    });
+    this.segmentationBuffer_ = await resultTensor.data();
+    resultTensor.dispose();
 
     // Blur
     const texelWidth = 1 / this.size_.width;
@@ -287,6 +299,7 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
   
     // Create a video frame from canvas and enqueue it to controller
     // alpha: 'discard' is needed in order to send frames to a PeerConnection.
+    frame.close();
     controller.enqueue(new VideoFrame(this.canvas_, {timestamp: frame.timestamp, alpha: 'discard'}));
   }
 
@@ -297,6 +310,9 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
       /** @type {!WEBGL_lose_context} */ (
         this.gl_.getExtension('WEBGL_lose_context'))
           .loseContext();
+    }
+    if (this.deeplab_) {
+      this.deeplab_.dispose();
     }
   }
 }
