@@ -36,8 +36,7 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     this.texelSizeLocation_ = null;
 
     // Resources for blur processing with size
-    this.size_ = {width: 513, height: 513};
-    this.segmentationTexture_ = null;
+    this.segmentationSize_ = {width: 513, height: 513};
     this.texture1_ = null;
     this.texture2_ = null;
     this.frameBuffer1_ = null;
@@ -81,16 +80,17 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     const blurFragmentShaderSrc = `#version 300 es
       precision highp float;
       uniform sampler2D u_inputFrame;
-      uniform highp isampler2D u_inputSegmentation;
+      uniform sampler2D u_inputSegmentation;
       uniform vec2 u_texelSize;
       in vec2 v_texCoord;
       out vec4 outColor;
       const float offset[5] = float[](0.0, 1.0, 2.0, 3.0, 4.0);
       const float weight[5] = float[](0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162);
+
       void main() {
         vec4 centerColor = texture(u_inputFrame, v_texCoord);
-        int label = texture(u_inputSegmentation, v_texCoord).r;
-        if (label == 0) {
+        float label = texture(u_inputSegmentation, vec2(v_texCoord[0], 1.0 - v_texCoord[1])).a;
+        if (label == 0.0) {
           vec4 frameColor = centerColor * weight[0];
           for (int i = 1; i < 5; i++) {
             vec2 offset = vec2(offset[i]) * u_texelSize;
@@ -100,7 +100,7 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
             frameColor += texture(u_inputFrame, texCoord) * weight[i];
           }
           outColor = vec4(frameColor.rgb + (1.0 - frameColor.a) * centerColor.rgb, 1.0);
-          // green screen
+          // green screen for test
           // outColor = vec4(0.0, 1.0, 0.0, 1.0);
         } else {
           outColor = centerColor;
@@ -113,13 +113,28 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
   
     // Initialize input texture
     this.inputTexture_ = this.createTexture_();
-    this.segmentationTexture_ = this.createTexture_(this.size_.width, this.size_.height, gl.R32I);
-    this.texture1_ = this.createTexture_(this.size_.width, this.size_.height);
+    this.texture1_ = this.createTexture_(this.segmentationSize_.width, this.segmentationSize_.height);
     this.frameBuffer1_ = this.createFramebuffer_(this.texture1_);
-    this.texture2_ = this.createTexture_(this.size_.width, this.size_.height);
+    this.texture2_ = this.createTexture_(this.segmentationSize_.width, this.segmentationSize_.height);
     this.frameBuffer2_ = this.createFramebuffer_(this.texture2_);
 
     // Load deeplab model
+    // Initialize tf.js WebGL backend with this.gl_
+    const customBackendName = 'custom-webgl';
+    this.MaybeResetCustomBackend(customBackendName);
+    await tf.setBackend('webgl');
+    const webglBackend = tf.backend();
+    const gpgpuContext = webglBackend.gpgpu;
+    const kernels = tf.getKernelsForBackend('webgl');
+    kernels.forEach(kernelConfig => {
+      const newKernelConfig = { ...kernelConfig, backendName: customBackendName };
+      tf.registerKernel(newKernelConfig);
+    });
+    tf.registerBackend(customBackendName, () => {
+      return new webglBackend.constructor(
+          new gpgpuContext.constructor(gl));
+    });
+    await tf.setBackend(customBackendName);
     this.deeplab_ = await tf.loadGraphModel('../../../tfjs-models/deeplab_pascal_1_default_1/model.json');
     console.log('DeepLab model loaded', this.deeplab_);
 
@@ -236,42 +251,40 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
       this.canvas_.width = frame.displayWidth;
       this.canvas_.height = frame.displayHeight;
     }
+
+    // Segmentation
+    const videoBitmap = await createImageBitmap(frame, {resizeWidth: this.segmentationSize_.width, resizeHeight: this.segmentationSize_.height});
+    const resultTensor = tf.tidy(() => {
+      let inputTensor = tf.browser.fromPixels(videoBitmap);
+      const inputShape = inputTensor.shape;
+      inputShape.unshift(1);
+      inputTensor = inputTensor.reshape(inputShape);
+      let outputTensor = this.deeplab_.predict(inputTensor);
+      // Make a 4-D tensor in shape [1, 513, 513, 4] to simplify the texel format
+      // https://github.com/tensorflow/tfjs/blob/master/docs/OPTIMIZATION_PURE_GPU_PIPELINE.md
+      return tf.stack([outputTensor, outputTensor, outputTensor, outputTensor], 3);
+    });
+    const resultGPUData = resultTensor.dataToGPU();
+    resultTensor.dispose();
+
     // Upload frame to input texture
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.inputTexture_);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
 
-    // Resize from input texture to texture2
-    gl.viewport(0, 0, this.size_.width, this.size_.height);
-    gl.useProgram(this.resizeProgram_);
-    gl.uniform1i(this.resizeProgramInputSampler_, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer2_);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-
-    // Segmentation
-    const videoBitmap = await createImageBitmap(frame, {resizeWidth: this.size_.width, resizeHeight: this.size_.height});
-    const resultTensor = tf.tidy(() => {
-      let inputTensor = tf.browser.fromPixels(videoBitmap);
-      const inputShape = inputTensor.shape;
-      inputShape.unshift(1);
-      inputTensor = inputTensor.reshape(inputShape);
-      return this.deeplab_.predict(inputTensor);
-    });
-    this.segmentationBuffer_ = await resultTensor.data();
-    resultTensor.dispose();
-
     // Blur
-    const texelWidth = 1 / this.size_.width;
-    const texelHeight = 1 / this.size_.height;
+    const texelWidth = 1 / this.segmentationSize_.width;
+    const texelHeight = 1 / this.segmentationSize_.height;
+    gl.viewport(0, 0, this.segmentationSize_.width, this.segmentationSize_.height);
+    gl.scissor(0, 0, this.segmentationSize_.width, this.segmentationSize_.height);
     gl.useProgram(this.blurProgram_);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.segmentationTexture_);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.size_.width, this.size_.height, gl.RED_INTEGER, gl.INT, this.segmentationBuffer_);
+    gl.bindTexture(gl.TEXTURE_2D, resultGPUData.texture);
     gl.uniform1i(this.blurProgramSegmentationSampler_, 1);
     gl.activeTexture(gl.TEXTURE2)
     gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
-    gl.uniform1i(this.blurProgramInputSampler_, 2);
+    gl.uniform1i(this.blurProgramInputSampler_, 0);
     for (let i = 0; i < 3; i++) {
       gl.uniform2f(this.texelSizeLocation_, 0, texelHeight);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer1_);
@@ -288,8 +301,11 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
       gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
     }
 
+    resultGPUData.tensorRef.dispose();
+
     // Resize from texture2 to canvas
     gl.viewport(0, 0, this.canvas_.width, this.canvas_.height);
+    gl.scissor(0, 0, this.canvas_.width, this.canvas_.height);
     gl.useProgram(this.resizeProgram_);
     gl.activeTexture(gl.TEXTURE2)
     gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
@@ -303,16 +319,27 @@ class WebGLBlurTransform { // eslint-disable-line no-unused-vars
     controller.enqueue(new VideoFrame(this.canvas_, {timestamp: frame.timestamp, alpha: 'discard'}));
   }
 
+  MaybeResetCustomBackend(customBackendName) {
+    if (this.deeplab_) {
+      this.deeplab_.dispose();
+    }
+    if (tf.getBackend() == customBackendName) {
+      const kernels = tf.getKernelsForBackend(customBackendName);
+      kernels.forEach(kernelConfig => {
+        tf.unregisterKernel(kernelConfig.kernelName, kernelConfig.backendName);
+      });
+      tf.removeBackend(customBackendName);
+    }
+  }
+
   /** @override */
   destroy() {
+    this.MaybeResetCustomBackend();
     if (this.gl_) {
       console.log('[WebGLTransform] Forcing WebGL context to be lost.');
       /** @type {!WEBGL_lose_context} */ (
         this.gl_.getExtension('WEBGL_lose_context'))
           .loseContext();
-    }
-    if (this.deeplab_) {
-      this.deeplab_.dispose();
     }
   }
 }
