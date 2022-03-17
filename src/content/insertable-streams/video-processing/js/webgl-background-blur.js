@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2020 The WebRTC project authors. All Rights Reserved.
+ *  Copyright (c) 2022 The WebRTC project authors. All Rights Reserved.
  *
  *  Use of this source code is governed by a BSD-style license
  *  that can be found in the LICENSE file in the root of the source
@@ -47,7 +47,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   }
   /** @override */
   async init() {
-    console.log('[WebGLTransform] Initializing WebGL.');
+    console.log('[WebGLBackgroundBlur] Initializing WebGL.');
     this.canvas_ = new OffscreenCanvas(1, 1);
     const gl = /** @type {?WebGL2RenderingContext} */ (
       this.canvas_.getContext('webgl2'));
@@ -139,7 +139,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     console.log('DeepLab model loaded', this.deeplab_);
 
     console.log(
-        '[WebGLTransform] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
+        '[WebGLBackgroundBlur] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
         this.canvas_, `${this.debugPath_}.gl_ =`, this.gl_);
   }
 
@@ -336,7 +336,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   destroy() {
     this.MaybeResetCustomBackend();
     if (this.gl_) {
-      console.log('[WebGLTransform] Forcing WebGL context to be lost.');
+      console.log('[WebGLBackgroundBlur] Forcing WebGL context to be lost.');
       /** @type {!WEBGL_lose_context} */ (
         this.gl_.getExtension('WEBGL_lose_context'))
           .loseContext();
