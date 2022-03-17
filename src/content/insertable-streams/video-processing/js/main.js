@@ -222,8 +222,8 @@ function initUI() {
       case 'webgl':
         pipeline.updateTransform(new WebGLTransform());
         break;
-      case 'webgl-blur':
-        pipeline.updateTransform(new WebGLBlurTransform());
+      case 'webgl-background-blur':
+        pipeline.updateTransform(new WebGLBackgroundBlurTransform());
         break;
       case 'canvas2d':
         pipeline.updateTransform(new CanvasTransform());
