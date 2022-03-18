@@ -226,7 +226,7 @@ function initUI() {
         pipeline.updateTransform(new WebGLBackgroundBlurTransform());
         break;
       case 'webnn-background-blur':
-        pipeline.updateTransform(new WebNNBackgroundBlurTransform());
+        pipeline.updateTransform(new WebGPUBackgroundBlurTransform());
         break;
       case 'canvas2d':
         pipeline.updateTransform(new CanvasTransform());

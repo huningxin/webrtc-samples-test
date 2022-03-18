@@ -8,6 +8,26 @@
 
 'use strict';
 
+const preprocessWGSL = `
+[[block]] struct Tensor {
+  values: array<f32>;
+};
+
+[[group(0), binding(0)]] var samp : sampler;
+[[group(0), binding(1)]] var<storage, write> inputTensor : Tensor;
+[[group(0), binding(2)]] var inputTex : texture_2d<f32>;
+
+[[stage(compute), workgroup_size(8, 8)]]
+fn main([[builtin(global_invocation_id)]] globalID : vec3<u32>) {
+  let dims : vec2<i32> = textureDimensions(inputTex, 0);
+  var inputValue = textureSampleLevel(inputTex, samp, vec2<f32>(globalID.xy) / vec2<f32>(dims), 0.0).rgb;
+  var normalizedInput = (inputValue * vec3<f32>(255.0, 255.0, 255.0) - vec3<f32>(127.5, 127.5, 127.5)) / vec3<f32>(127.5, 127.5, 127.5);
+  inputTensor.values[0u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.r;
+  inputTensor.values[1u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.g;
+  inputTensor.values[2u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.b;
+}
+`;
+
 const segWGSL = `
 [[block]] struct SegMap {
   labels: array<i32>;
@@ -41,7 +61,7 @@ fn main([[builtin(global_invocation_id)]] globalID : vec3<u32>) {
     textureStore(outputTex, vec2<i32>(globalID.xy), vec4<f32>(input, 1.0));
   }
 }
-`
+`;
 
 const blurWGSL = `
 [[block]] struct Params {
@@ -173,7 +193,7 @@ const batch = [4, 4];
  * Segmentation using WebNN and applies a blur effect using WebGPU.
  * @implements {FrameTransform} in pipeline.js
  */
- class WebNNBackgroundBlurTransform { // eslint-disable-line no-unused-vars
+ class WebGPUBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   constructor() {
     // All fields are initialized in init()
     /** @private {?OffscreenCanvas} canvas used to render video frame */
@@ -191,11 +211,13 @@ const batch = [4, 4];
     };
     this.segmentationSize_ = {width: 513, height: 513};
     this.segmapBuffer_ = null;
+
+    this.deeplab_ = null;
   }
 
   /** @override */
   async init() {
-    console.log('[WebNNBackgroundBlurTransform] Initializing WebGPU.');
+    console.log('[WebGPUBackgroundBlurTransform] Initializing WebGPU.');
     if (!navigator.gpu) {
       alert(
         'Failed to detect WebGPU. Check that WebGPU is supported ' +
@@ -223,6 +245,16 @@ const batch = [4, 4];
       },
     });
     this.segPipeline_ = segPipeline;
+
+    const preprocessPipeline = device.createComputePipeline({
+      compute: {
+        module: device.createShaderModule({
+          code: preprocessWGSL,
+        }),
+        entryPoint: 'main',
+      },
+    });
+    this.preprocessPipeline_ = preprocessPipeline;
 
     const blurPipeline = device.createComputePipeline({
       compute: {
@@ -326,6 +358,15 @@ const batch = [4, 4];
     })();
     this.segmapSizeBuffer_ = segmapSizeBuffer;
 
+    const inputTensorBuffer = (() => {
+      const buffer = device.createBuffer({
+        size: 3 * this.segmentationSize_.width * this.segmentationSize_.height * Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+      });
+      return buffer;
+    })();
+    this.inputTensorBuffer_ = inputTensorBuffer;
+
     const segmapBuffer = (() => {
       const buffer = device.createBuffer({
         size: this.segmentationSize_.width * this.segmentationSize_.height * Uint32Array.BYTES_PER_ELEMENT,
@@ -423,8 +464,11 @@ const batch = [4, 4];
       new Uint32Array([settings.filterSize, blockDim])
     );
 
+    this.deeplab_ = new DeepLabV3MNV2Nchw()
+    await this.deeplab_.init(this.device_);
+
     console.log(
-        '[WebNNBackgroundBlurTransform] WebGPU initialized.', `${this.debugPath_}.canvas_ =`,
+        '[WebGPUBackgroundBlurTransform] WebGPU initialized.', `${this.debugPath_}.canvas_ =`,
         this.canvas_, `${this.debugPath_}.device_ =`, this.device_);
   }
 
@@ -498,6 +542,26 @@ const batch = [4, 4];
       ],
     });
 
+    const preprocessBindGroup = device.createBindGroup({
+      layout: this.preprocessPipeline_.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.sampler_,
+        },
+        {
+          binding: 1,
+          resource: {
+            buffer: this.inputTensorBuffer_,
+          },
+        },
+        {
+          binding: 2,
+          resource: externalResource,
+        },
+      ],
+    });
+
     const computeBindGroup0 = device.createBindGroup({
       layout: this.blurPipeline_.getBindGroupLayout(1),
       entries: [
@@ -551,6 +615,15 @@ const batch = [4, 4];
       );
     }
 
+    computePass.setPipeline(this.preprocessPipeline_);
+    computePass.setBindGroup(0, preprocessBindGroup);
+    computePass.dispatch(
+      Math.ceil(width / 8),
+      Math.ceil(height / 8)
+    );
+
+    this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
+
     computePass.setPipeline(this.segPipeline_);
     computePass.setBindGroup(0, computeSegBindGroup);
     computePass.dispatch(
@@ -585,7 +658,7 @@ const batch = [4, 4];
   /** @override */
   destroy() {
     if (this.device_) {
-      console.log('[WebNNBackgroundBlurTransform] Destory WebGPU device.');
+      console.log('[WebGPUBackgroundBlurTransform] Destory WebGPU device.');
       this.device_.destroy();
       this.device_ = null;
     }
