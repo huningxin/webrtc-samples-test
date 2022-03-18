@@ -34,6 +34,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     this.blurProgramInputSampler_ = null;
     this.blurProgramSegmentationSampler_ = null;
     this.texelSizeLocation_ = null;
+    this.blurBackgroundLocation_ = null;
 
     // Resources for blur processing with size
     this.segmentationSize_ = {width: 513, height: 513};
@@ -44,6 +45,9 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
 
     // tfjs deeplab model for segmentation
     this.deeplab_ = null;
+
+    this.blurBackgroundCheckbox_ = (/** @type {!HTMLInputElement} */ (
+      document.getElementById('blurBackground')));
   }
   /** @override */
   async init() {
@@ -73,7 +77,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
       in vec2 v_texCoord;
       out vec4 outColor;
       void main() {
-        outColor = texture(u_inputFrame, v_texCoord);
+        outColor = texture(u_inputFrame, vec2(v_texCoord[0], 1.0 - v_texCoord[1]));
       }`;
     this.resizeProgram_ = this.createProgram_(vertexShaderSrc, resizeFragmentShaderSrc);
     this.resizeProgramInputSampler_ = gl.getUniformLocation(this.resizeProgram_, 'u_inputFrame');
@@ -82,6 +86,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
       uniform sampler2D u_inputFrame;
       uniform sampler2D u_inputSegmentation;
       uniform vec2 u_texelSize;
+      uniform int u_blurBackground;
       in vec2 v_texCoord;
       out vec4 outColor;
       const float offset[5] = float[](0.0, 1.0, 2.0, 3.0, 4.0);
@@ -89,7 +94,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
 
       void main() {
         vec4 centerColor = texture(u_inputFrame, v_texCoord);
-        float label = texture(u_inputSegmentation, vec2(v_texCoord[0], 1.0 - v_texCoord[1])).a;
+        float label = u_blurBackground == 1 ? texture(u_inputSegmentation, vec2(v_texCoord[0], v_texCoord[1])).a : 0.0;
         if (label == 0.0) {
           vec4 frameColor = centerColor * weight[0];
           for (int i = 1; i < 5; i++) {
@@ -110,6 +115,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     this.blurProgramInputSampler_ = gl.getUniformLocation(this.blurProgram_, 'u_inputFrame');
     this.blurProgramSegmentationSampler_ = gl.getUniformLocation(this.blurProgram_, 'u_inputSegmentation');
     this.texelSizeLocation_ = gl.getUniformLocation(this.blurProgram_, 'u_texelSize');
+    this.blurBackgroundLocation_ = gl.getUniformLocation(this.blurProgram_, 'u_blurBackground');
   
     // Initialize input texture
     this.inputTexture_ = this.createTexture_();
@@ -242,7 +248,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   /** @override */
   async transform(frame, controller) {
     const gl = this.gl_;
-    if (!gl || !this.canvas_) {
+    if (!gl || !this.canvas_ || !this.deeplab_) {
       frame.close();
       return;
     }
@@ -254,24 +260,27 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
 
     // Segmentation
     const videoBitmap = await createImageBitmap(frame, {resizeWidth: this.segmentationSize_.width, resizeHeight: this.segmentationSize_.height});
-    const resultTensor = tf.tidy(() => {
-      let inputTensor = tf.browser.fromPixels(videoBitmap);
-      const inputShape = inputTensor.shape;
-      inputShape.unshift(1);
-      inputTensor = inputTensor.reshape(inputShape);
-      let outputTensor = this.deeplab_.predict(inputTensor);
-      // Make a 4-D tensor in shape [1, 513, 513, 4] to simplify the texel format
-      // https://github.com/tensorflow/tfjs/blob/master/docs/OPTIMIZATION_PURE_GPU_PIPELINE.md
-      return tf.stack([outputTensor, outputTensor, outputTensor, outputTensor], 3);
-    });
-    const resultGPUData = resultTensor.dataToGPU();
-    resultTensor.dispose();
+    const isBlurBackground = this.blurBackgroundCheckbox_.checked ? true : false;
+    let resultTensor;
+    let resultGPUData;
+    if (isBlurBackground) {
+      resultTensor = tf.tidy(() => {
+        let inputTensor = tf.browser.fromPixels(videoBitmap);
+        const inputShape = inputTensor.shape;
+        inputShape.unshift(1);
+        inputTensor = inputTensor.reshape(inputShape);
+        let outputTensor = this.deeplab_.predict(inputTensor);
+        // Make a 4-D tensor in shape [1, 513, 513, 4] to simplify the texel format
+        // https://github.com/tensorflow/tfjs/blob/master/docs/OPTIMIZATION_PURE_GPU_PIPELINE.md
+        return tf.stack([outputTensor, outputTensor, outputTensor, outputTensor], 3);
+      });
+      resultGPUData = resultTensor.dataToGPU();
+    }
 
     // Upload frame to input texture
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.inputTexture_);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoBitmap);
 
     // Blur
     const texelWidth = 1 / this.segmentationSize_.width;
@@ -279,9 +288,14 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     gl.viewport(0, 0, this.segmentationSize_.width, this.segmentationSize_.height);
     gl.scissor(0, 0, this.segmentationSize_.width, this.segmentationSize_.height);
     gl.useProgram(this.blurProgram_);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, resultGPUData.texture);
-    gl.uniform1i(this.blurProgramSegmentationSampler_, 1);
+    if (isBlurBackground) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, resultGPUData.texture);
+      gl.uniform1i(this.blurProgramSegmentationSampler_, 1);
+      gl.uniform1i(this.blurBackgroundLocation_, 1);
+    } else {
+      gl.uniform1i(this.blurBackgroundLocation_, 0);
+    }
     gl.activeTexture(gl.TEXTURE2)
     gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
     gl.uniform1i(this.blurProgramInputSampler_, 0);
@@ -301,7 +315,10 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
       gl.bindTexture(gl.TEXTURE_2D, this.texture2_);
     }
 
-    resultGPUData.tensorRef.dispose();
+    if (isBlurBackground) {
+      resultTensor.dispose();
+      resultGPUData.tensorRef.dispose();
+    }
 
     // Resize from texture2 to canvas
     gl.viewport(0, 0, this.canvas_.width, this.canvas_.height);
@@ -312,6 +329,8 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     gl.uniform1i(this.resizeProgramInputSampler_, 2);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.finish();
   
     // Create a video frame from canvas and enqueue it to controller
     // alpha: 'discard' is needed in order to send frames to a PeerConnection.
@@ -322,6 +341,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   MaybeResetCustomBackend(customBackendName) {
     if (this.deeplab_) {
       this.deeplab_.dispose();
+      this.deeplab_ = null;
     }
     if (tf.getBackend() == customBackendName) {
       const kernels = tf.getKernelsForBackend(customBackendName);

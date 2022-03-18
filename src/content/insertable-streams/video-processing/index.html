@@ -58,15 +58,16 @@
     <div class="box">
         <span>Transform:</span>
         <select id="transformSelector" disabled>
-            <option value="webgl">WebGL Wrap</option>
+            <option value="webgl">WebGL wrap</option>
             <option value="canvas2d">Canvas2D</option>
             <option value="noop">Do nothing</option>
             <option value="drop">Drop frames at random</option>
             <option value="delay">Delay all frames by 100ms</option>
             <option value="webcodec">Run frames through WebCodec</option>
-            <option value="webgl-background-blur">WebGL background blur</option>
-            <option selected value="webnn-background-blur">WebNN/WebGPU background blur</option>
+            <option selected value="webgl-background-blur">WebGL blur</option>
+            <option value="webgpu-background-blur">WebGPU blur</option>
         </select>
+        <span>Segment background: <input type="checkbox" id="blurBackground"></span>
     </div>
     <div class="box">
         <span>Destination:</span>

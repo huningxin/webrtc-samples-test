@@ -121,6 +121,12 @@ class DeepLabV3MNV2Nchw {
 
   async init(device) {
     this.device_ = device;
+    if (!navigator.ml) {
+      alert(
+        'Failed to detect WebNN. Check that WebNN is supported ' +
+        'by your browser and hardware.');
+      throw new Error('Failed to detect WebNN');
+    }
     const context = navigator.ml.createContext(this.device_);
     this.builder_ = new MLGraphBuilder(context);
     const strides = [2, 2];

@@ -213,6 +213,9 @@ const batch = [4, 4];
     this.segmapBuffer_ = null;
 
     this.deeplab_ = null;
+
+    this.blurBackgroundCheckbox_ = (/** @type {!HTMLInputElement} */ (
+      document.getElementById('blurBackground')));
   }
 
   /** @override */
@@ -440,21 +443,6 @@ const batch = [4, 4];
     });
     this.computeBindGroup2_ = computeBindGroup2;
 
-    const showResultBindGroup = device.createBindGroup({
-      layout: fullscreenQuadPipeline.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: sampler,
-        },
-        {
-          binding: 1,
-          resource: textures[2].createView(),
-        },
-      ],
-    });
-    this.showResultBindGroup_ = showResultBindGroup;
-
     const settings = this.settings_;
 
     const blockDim = tileDim - (settings.filterSize - 1);
@@ -476,10 +464,12 @@ const batch = [4, 4];
   async transform(frame, controller) {
     const device = this.device_;
     const canvas = this.canvas_;
-    if (!device || !canvas) {
+    if (!device || !canvas || !this.deeplab_) {
       frame.close();
       return;
     }
+
+    const isBlurBackground = this.blurBackgroundCheckbox_.checked ? true : false;
 
     // Set output size to input size
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
@@ -615,21 +605,21 @@ const batch = [4, 4];
       );
     }
 
-    computePass.setPipeline(this.preprocessPipeline_);
-    computePass.setBindGroup(0, preprocessBindGroup);
-    computePass.dispatch(
-      Math.ceil(width / 8),
-      Math.ceil(height / 8)
-    );
-
-    this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
-
-    computePass.setPipeline(this.segPipeline_);
-    computePass.setBindGroup(0, computeSegBindGroup);
-    computePass.dispatch(
-      Math.ceil(width / 8),
-      Math.ceil(height / 8)
-    );
+    if (isBlurBackground) {
+      computePass.setPipeline(this.preprocessPipeline_);
+      computePass.setBindGroup(0, preprocessBindGroup);
+      computePass.dispatch(
+        Math.ceil(width / 8),
+        Math.ceil(height / 8)
+      );
+      this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
+      computePass.setPipeline(this.segPipeline_);
+      computePass.setBindGroup(0, computeSegBindGroup);
+      computePass.dispatch(
+        Math.ceil(width / 8),
+        Math.ceil(height / 8)
+      );
+    }
 
     computePass.endPass();
 
@@ -643,11 +633,27 @@ const batch = [4, 4];
       ],
     });
 
+    const showResultBindGroup = device.createBindGroup({
+      layout: this.fullscreenQuadPipeline_.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.sampler_,
+        },
+        {
+          binding: 1,
+          resource: isBlurBackground ? this.textures_[2].createView() : this.textures_[0].createView(),
+        },
+      ],
+    });
+
     passEncoder.setPipeline(this.fullscreenQuadPipeline_);
-    passEncoder.setBindGroup(0, this.showResultBindGroup_);
+    passEncoder.setBindGroup(0, showResultBindGroup);
     passEncoder.draw(6, 1, 0, 0);
     passEncoder.endPass();
     device.queue.submit([commandEncoder.finish()]);
+
+    await device.queue.onSubmittedWorkDone();
 
     // Create a video frame from canvas and enqueue it to controller
     // alpha: 'discard' is needed in order to send frames to a PeerConnection.
@@ -662,5 +668,6 @@ const batch = [4, 4];
       this.device_.destroy();
       this.device_ = null;
     }
+    this.deeplab_ = null;
   }
 }
