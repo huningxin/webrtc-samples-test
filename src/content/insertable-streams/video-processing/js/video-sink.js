@@ -39,6 +39,12 @@ class VideoSink { // eslint-disable-line no-unused-vars
       console.log(
           '[VideoSink] Added video element to page.',
           `${this.debugPath_}.video_ =`, this.video_);
+      const video = this.video_;
+      const updateFPS = (now, metadata) => {
+        stats.update();
+        video.requestVideoFrameCallback(updateFPS);
+      };
+      video.requestVideoFrameCallback(updateFPS);
     }
     this.video_.srcObject = stream;
     this.video_.play();
