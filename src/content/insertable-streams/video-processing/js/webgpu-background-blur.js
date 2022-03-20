@@ -22,41 +22,37 @@ fn main([[builtin(global_invocation_id)]] globalID : vec3<u32>) {
   let dims : vec2<i32> = textureDimensions(inputTex, 0);
   var inputValue = textureSampleLevel(inputTex, samp, vec2<f32>(globalID.xy) / vec2<f32>(dims), 0.0).rgb;
   var normalizedInput = (inputValue * vec3<f32>(255.0, 255.0, 255.0) - vec3<f32>(127.5, 127.5, 127.5)) / vec3<f32>(127.5, 127.5, 127.5);
+  var inputX : u32 = u32(floor(f32(globalID.x) / f32(dims.x) * 513.0));
+  var inputY : u32 = u32(floor(f32(globalID.y) / f32(dims.y) * 513.0));
   inputTensor.values[0u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.r;
   inputTensor.values[1u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.g;
   inputTensor.values[2u * 513u * 513u + globalID.y * 513u + globalID.x] = normalizedInput.b;
 }
 `;
 
-const segWGSL = `
+const segmentationWGSL = `
 [[block]] struct SegMap {
   labels: array<i32>;
 };
 
-[[block]] struct SegMapSize {
-  width: u32;
-  height: u32;
-};
-
 [[group(0), binding(0)]] var samp : sampler;
-[[group(0), binding(1)]] var<uniform> segmapSize : SegMapSize;
-[[group(0), binding(2)]] var<storage, read> segmap : SegMap;
-[[group(0), binding(3)]] var inputTex : texture_2d<f32>;
-[[group(0), binding(4)]] var backgroundTex : texture_2d<f32>;
-[[group(0), binding(5)]] var outputTex : texture_storage_2d<rgba8unorm, write>;
+[[group(0), binding(1)]] var<storage, read> segmap : SegMap;
+[[group(0), binding(2)]] var inputTex : texture_2d<f32>;
+[[group(0), binding(3)]] var blurredInputTex : texture_2d<f32>;
+[[group(0), binding(4)]] var outputTex : texture_storage_2d<rgba8unorm, write>;
 
 [[stage(compute), workgroup_size(8, 8)]]
 fn main([[builtin(global_invocation_id)]] globalID : vec3<u32>) {
   let dims : vec2<i32> = textureDimensions(inputTex, 0);
   
   var input = textureSampleLevel(inputTex, samp, vec2<f32>(globalID.xy) / vec2<f32>(dims), 0.0).rgb;
-  var background = textureSampleLevel(backgroundTex, samp, vec2<f32>(globalID.xy) / vec2<f32>(dims), 0.0).rgb;
+  var blurredInput = textureSampleLevel(blurredInputTex, samp, vec2<f32>(globalID.xy) / vec2<f32>(dims), 0.0).rgb;
   var green : vec3<f32> = vec3<f32>(0.0, 1.0, 0.0);
-  var segmapX : u32 = u32(floor(f32(globalID.x) / f32(dims.x) * f32(segmapSize.width)));
-  var segmapY : u32 = u32(floor(f32(globalID.y) / f32(dims.y) * f32(segmapSize.height)));
-  var segmapIndex = segmapX + segmapY * segmapSize.height;
+  var segmapX : u32 = u32(floor(f32(globalID.x) / f32(dims.x) * 513.0));
+  var segmapY : u32 = u32(floor(f32(globalID.y) / f32(dims.y) * 513.0));
+  var segmapIndex = segmapX + segmapY * 513u;
   if (segmap.labels[segmapIndex] == 0) {
-    textureStore(outputTex, vec2<i32>(globalID.xy), vec4<f32>(background, 1.0));
+    textureStore(outputTex, vec2<i32>(globalID.xy), vec4<f32>(blurredInput, 1.0));
   } else {
     textureStore(outputTex, vec2<i32>(globalID.xy), vec4<f32>(input, 1.0));
   }
@@ -205,11 +201,12 @@ const batch = [4, 4];
     this.device_ = null;
     this.adapter_ = null;
 
-    this.settings_ = {
-      filterSize: 15,
+    this.blurSettings_ = {
+      filterSize: 10,
       iterations: 2,
     };
-    this.segmentationSize_ = {width: 513, height: 513};
+    this.segmentationWidth_ = 513;
+    this.segmentationHeight_ = 513;
     this.segmapBuffer_ = null;
 
     this.deeplab_ = null;
@@ -239,16 +236,6 @@ const batch = [4, 4];
     const context = canvas.getContext('webgpu');
     this.context_ = context;
 
-    const segPipeline = device.createComputePipeline({
-      compute: {
-        module: device.createShaderModule({
-          code: segWGSL,
-        }),
-        entryPoint: 'main',
-      },
-    });
-    this.segPipeline_ = segPipeline;
-
     const preprocessPipeline = device.createComputePipeline({
       compute: {
         module: device.createShaderModule({
@@ -258,6 +245,16 @@ const batch = [4, 4];
       },
     });
     this.preprocessPipeline_ = preprocessPipeline;
+
+    const segmentationPipeline = device.createComputePipeline({
+      compute: {
+        module: device.createShaderModule({
+          code: segmentationWGSL,
+        }),
+        entryPoint: 'main',
+      },
+    });
+    this.segmentationPipeline_ = segmentationPipeline;
 
     const blurPipeline = device.createComputePipeline({
       compute: {
@@ -300,31 +297,6 @@ const batch = [4, 4];
     });
     this.sampler_ = sampler;
 
-    const cubeTexture = device.createTexture({
-      size: [this.segmentationSize_.width, this.segmentationSize_.height, 1],
-      format: 'rgba8unorm',
-      usage:
-        GPUTextureUsage.TEXTURE_BINDING |
-        GPUTextureUsage.COPY_DST |
-        GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    this.cubeTexture_ = cubeTexture;
-
-    const textures = [0, 1, 2].map(() => {
-      return device.createTexture({
-        size: {
-          width: this.segmentationSize_.width,
-          height: this.segmentationSize_.height,
-        },
-        format: 'rgba8unorm',
-        usage:
-          GPUTextureUsage.COPY_DST |
-          GPUTextureUsage.STORAGE_BINDING |
-          GPUTextureUsage.TEXTURE_BINDING,
-      });
-    });
-    this.textures_ = textures;
-
     const buffer0 = (() => {
       const buffer = device.createBuffer({
         size: 4,
@@ -349,36 +321,6 @@ const batch = [4, 4];
     })();
     this.buffer1_ = buffer1;
 
-    const segmapSizeBuffer = (() => {
-      const buffer = device.createBuffer({
-        size: 2 * Uint32Array.BYTES_PER_ELEMENT,
-        mappedAtCreation: true,
-        usage: GPUBufferUsage.UNIFORM,
-      });
-      new Uint32Array(buffer.getMappedRange()).set([this.segmentationSize_.width, this.segmentationSize_.height]);
-      buffer.unmap();
-      return buffer;
-    })();
-    this.segmapSizeBuffer_ = segmapSizeBuffer;
-
-    const inputTensorBuffer = (() => {
-      const buffer = device.createBuffer({
-        size: 3 * this.segmentationSize_.width * this.segmentationSize_.height * Float32Array.BYTES_PER_ELEMENT,
-        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
-      });
-      return buffer;
-    })();
-    this.inputTensorBuffer_ = inputTensorBuffer;
-
-    const segmapBuffer = (() => {
-      const buffer = device.createBuffer({
-        size: this.segmentationSize_.width * this.segmentationSize_.height * Uint32Array.BYTES_PER_ELEMENT,
-        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
-      });
-      return buffer;
-    })();
-    this.segmapBuffer_ = segmapBuffer;
-
     const blurParamsBuffer = device.createBuffer({
       size: 8,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
@@ -401,49 +343,35 @@ const batch = [4, 4];
     });
     this.computeConstants_ = computeConstants;
 
-    const computeBindGroup1 = device.createBindGroup({
-      layout: blurPipeline.getBindGroupLayout(1),
-      entries: [
-        {
-          binding: 1,
-          resource: textures[0].createView(),
-        },
-        {
-          binding: 2,
-          resource: textures[1].createView(),
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: buffer1,
-          },
-        },
-      ],
+    const segmentationInputTexture = device.createTexture({
+      size: [this.segmentationWidth_, this.segmentationHeight_, 1],
+      format: 'rgba8unorm',
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
     });
-    this.computeBindGroup1_ = computeBindGroup1;
+    this.segmentationInputTexture_ = segmentationInputTexture;
 
-    const computeBindGroup2 = device.createBindGroup({
-      layout: blurPipeline.getBindGroupLayout(1),
-      entries: [
-        {
-          binding: 1,
-          resource: textures[1].createView(),
-        },
-        {
-          binding: 2,
-          resource: textures[0].createView(),
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: buffer0,
-          },
-        },
-      ],
-    });
-    this.computeBindGroup2_ = computeBindGroup2;
+    const inputTensorBuffer = (() => {
+      const buffer = device.createBuffer({
+        size: 3 * this.segmentationWidth_ * this.segmentationHeight_ * Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+      });
+      return buffer;
+    })();
+    this.inputTensorBuffer_ = inputTensorBuffer;
 
-    const settings = this.settings_;
+    const segmapBuffer = (() => {
+      const buffer = device.createBuffer({
+        size: this.segmentationWidth_ * this.segmentationHeight_ * Uint32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+      });
+      return buffer;
+    })();
+    this.segmapBuffer_ = segmapBuffer;
+
+    const settings = this.blurSettings_;
 
     const blockDim = tileDim - (settings.filterSize - 1);
     device.queue.writeBuffer(
@@ -460,6 +388,34 @@ const batch = [4, 4];
         this.canvas_, `${this.debugPath_}.device_ =`, this.device_);
   }
 
+  initResources_(frameWidth, frameHeight) {
+    const device = this.device_;
+    const cubeTexture = device.createTexture({
+      size: [frameWidth, frameHeight, 1],
+      format: 'rgba8unorm',
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.cubeTexture_ = cubeTexture;
+
+    const textures = [0, 1, 2].map(() => {
+      return device.createTexture({
+        size: {
+          width: frameWidth,
+          height: frameHeight,
+        },
+        format: 'rgba8unorm',
+        usage:
+          GPUTextureUsage.COPY_DST |
+          GPUTextureUsage.STORAGE_BINDING |
+          GPUTextureUsage.TEXTURE_BINDING,
+      });
+    });
+    this.textures_ = textures;
+  }
+
   /** @override */
   async transform(frame, controller) {
     const device = this.device_;
@@ -469,12 +425,14 @@ const batch = [4, 4];
       return;
     }
 
-    const isBlurBackground = this.blurBackgroundCheckbox_.checked ? true : false;
+    const isSegmentBackground = this.blurBackgroundCheckbox_.checked ? true : false;
 
     // Set output size to input size
-    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-      canvas.width = frame.displayWidth;
-      canvas.height = frame.displayHeight;
+    const frameWidth = frame.displayWidth;
+    const frameHeight = frame.displayHeight;
+    if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+      canvas.width = frameWidth;
+      canvas.height = frameHeight;
       const devicePixelRatio = window.devicePixelRatio || 1;
       const presentationSize = [
         canvas.width * devicePixelRatio,
@@ -486,78 +444,63 @@ const batch = [4, 4];
           format: presentationFormat,
           size: presentationSize,
         });
+      this.initResources_(frameWidth, frameHeight);
     }
-    const width = this.segmentationSize_.width;
-    const height = this.segmentationSize_.height;
-    const videoBitmap = await createImageBitmap(frame, {resizeWidth: width, resizeHeight: height});
+    const videoBitmap = await createImageBitmap(frame);
     device.queue.copyExternalImageToTexture(
       { source: videoBitmap },
       { texture: this.cubeTexture_ },
-      [ width, height]
+      [frameWidth, frameHeight]
     );
     videoBitmap.close();
     const externalResource = this.cubeTexture_.createView();
 
-    const computeSegBindGroup = device.createBindGroup({
-      layout: this.segPipeline_.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.sampler_,
-        },
-        {
-          binding: 1,
-          resource: {
-            buffer: this.segmapSizeBuffer_,
-          },
-        },
-        {
-          binding: 2,
-          resource: {
-            buffer: this.segmapBuffer_,
-          },
-        },
-        {
-          binding: 3,
-          resource: externalResource,
-        },
-        {
-          binding: 4,
-          resource: this.textures_[0].createView(),
-        },
-        {
-          binding: 5,
-          resource: this.textures_[2].createView(),
-        },
-      ],
-    });
-
-    const preprocessBindGroup = device.createBindGroup({
-      layout: this.preprocessPipeline_.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.sampler_,
-        },
-        {
-          binding: 1,
-          resource: {
-            buffer: this.inputTensorBuffer_,
-          },
-        },
-        {
-          binding: 2,
-          resource: externalResource,
-        },
-      ],
-    });
-
-    const computeBindGroup0 = device.createBindGroup({
+    const blurBindGroup0 = device.createBindGroup({
       layout: this.blurPipeline_.getBindGroupLayout(1),
       entries: [
         {
           binding: 1,
           resource: externalResource,
+        },
+        {
+          binding: 2,
+          resource: this.textures_[0].createView(),
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.buffer0_,
+          },
+        },
+      ],
+    });
+
+    const blurBindGroup1 = device.createBindGroup({
+      layout: this.blurPipeline_.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 1,
+          resource: this.textures_[0].createView(),
+        },
+        {
+          binding: 2,
+          resource: this.textures_[1].createView(),
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.buffer1_,
+          },
+        },
+      ],
+    });
+
+    const blurBindGroup2 = device.createBindGroup({
+      layout: this.blurPipeline_.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 1,
+          resource: this.textures_[1].createView(),
         },
         {
           binding: 2,
@@ -578,46 +521,105 @@ const batch = [4, 4];
     computePass.setPipeline(this.blurPipeline_);
     computePass.setBindGroup(0, this.computeConstants_);
 
-    const blockDim = tileDim - (this.settings_.filterSize - 1);
-    computePass.setBindGroup(1, computeBindGroup0);
+    const blockDim = tileDim - (this.blurSettings_.filterSize - 1);
+    computePass.setBindGroup(1, blurBindGroup0);
     computePass.dispatch(
-      Math.ceil(width / blockDim),
-      Math.ceil(height / batch[1])
+      Math.ceil(frameWidth / blockDim),
+      Math.ceil(frameHeight / batch[1])
     );
 
-    computePass.setBindGroup(1, this.computeBindGroup1_);
+    computePass.setBindGroup(1, blurBindGroup1);
     computePass.dispatch(
-      Math.ceil(width / blockDim),
-      Math.ceil(height / batch[1])
+      Math.ceil(frameHeight / blockDim),
+      Math.ceil(frameWidth / batch[1])
     );
 
-    for (let i = 0; i < this.settings_.iterations - 1; ++i) {
-      computePass.setBindGroup(1, this.computeBindGroup2_);
+    for (let i = 0; i < this.blurSettings_.iterations - 1; ++i) {
+      computePass.setBindGroup(1, blurBindGroup2);
       computePass.dispatch(
-        Math.ceil(width / blockDim),
-        Math.ceil(height / batch[1])
+        Math.ceil(frameWidth / blockDim),
+        Math.ceil(frameHeight / batch[1])
       );
 
-      computePass.setBindGroup(1, this.computeBindGroup1_);
+      computePass.setBindGroup(1, blurBindGroup1);
       computePass.dispatch(
-        Math.ceil(height / blockDim),
-        Math.ceil(width / batch[1])
+        Math.ceil(frameHeight / blockDim),
+        Math.ceil(frameWidth / batch[1])
       );
     }
 
-    if (isBlurBackground) {
+    if (isSegmentBackground) {
+      const resizedVideoBitmap = await createImageBitmap(
+        frame, {resizeWidth: this.segmentationWidth_, resizeHeight: this.segmentationHeight_});
+      device.queue.copyExternalImageToTexture(
+        { source: resizedVideoBitmap },
+        { texture: this.segmentationInputTexture_ },
+        [this.segmentationWidth_, this.segmentationHeight_]
+      );
+      resizedVideoBitmap.close();
+
+      const preprocessBindGroup = device.createBindGroup({
+        layout: this.preprocessPipeline_.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.sampler_,
+          },
+          {
+            binding: 1,
+            resource: {
+              buffer: this.inputTensorBuffer_,
+            },
+          },
+          {
+            binding: 2,
+            resource: this.segmentationInputTexture_.createView(),
+          },
+        ],
+      });
+
+      const segmentationBindBroup = device.createBindGroup({
+        layout: this.segmentationPipeline_.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.sampler_,
+          },
+          {
+            binding: 1,
+            resource: {
+              buffer: this.segmapBuffer_,
+            },
+          },
+          {
+            binding: 2,
+            resource: externalResource,
+          },
+          {
+            binding: 3,
+            resource: this.textures_[0].createView(),
+          },
+          {
+            binding: 4,
+            resource: this.textures_[2].createView(),
+          },
+        ],
+      });
+
       computePass.setPipeline(this.preprocessPipeline_);
       computePass.setBindGroup(0, preprocessBindGroup);
       computePass.dispatch(
-        Math.ceil(width / 8),
-        Math.ceil(height / 8)
+        Math.ceil(this.segmentationWidth_ / 8),
+        Math.ceil(this.segmentationHeight_ / 8)
       );
+
       this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
-      computePass.setPipeline(this.segPipeline_);
-      computePass.setBindGroup(0, computeSegBindGroup);
+
+      computePass.setPipeline(this.segmentationPipeline_);
+      computePass.setBindGroup(0, segmentationBindBroup);
       computePass.dispatch(
-        Math.ceil(width / 8),
-        Math.ceil(height / 8)
+        Math.ceil(frameWidth / 8),
+        Math.ceil(frameHeight / 8)
       );
     }
 
@@ -642,7 +644,7 @@ const batch = [4, 4];
         },
         {
           binding: 1,
-          resource: isBlurBackground ? this.textures_[2].createView() : this.textures_[0].createView(),
+          resource: isSegmentBackground ? this.textures_[2].createView() : this.textures_[0].createView(),
         },
       ],
     });
