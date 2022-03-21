@@ -8,6 +8,8 @@
 
 'use strict';
 
+const customBackendName = 'custom-webgl';
+
 /**
  * Applies a blur effect using WebGL.
  * @implements {FrameTransform} in pipeline.js
@@ -132,9 +134,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     this.segmentProgramBlurredInputSampler_ = gl.getUniformLocation(this.segmentProgram_, 'u_blurredInputFrame');
     this.segmentProgramSegmentationSampler_ = gl.getUniformLocation(this.segmentProgram_, 'u_inputSegmentation');
 
-    // Load deeplab model
     // Initialize tf.js WebGL backend with this.gl_
-    const customBackendName = 'custom-webgl';
     this.MaybeResetCustomBackend(customBackendName);
     await tf.setBackend('webgl');
     const webglBackend = tf.backend();
@@ -148,9 +148,6 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
       return new webglBackend.constructor(
           new gpgpuContext.constructor(gl));
     });
-    await tf.setBackend(customBackendName);
-    this.deeplab_ = await tf.loadGraphModel('../../../tfjs-models/deeplab_pascal_1_default_1/model.json');
-    console.log('DeepLab model loaded', this.deeplab_);
 
     console.log(
         '[WebGLBackgroundBlur] WebGL initialized.', `${this.debugPath_}.canvas_ =`,
@@ -265,7 +262,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
   /** @override */
   async transform(frame, controller) {
     const gl = this.gl_;
-    if (!gl || !this.canvas_ || !this.deeplab_) {
+    if (!gl || !this.canvas_) {
       frame.close();
       return;
     }
@@ -284,6 +281,11 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     let resultTensor;
     let resultGPUData;
     if (isSegmentBackground) {
+      if (!this.deeplab_) {
+        await tf.setBackend(customBackendName);
+        this.deeplab_ = await tf.loadGraphModel('../../../tfjs-models/deeplab_pascal_1_default_1/model.json');
+        console.log('DeepLab model loaded', this.deeplab_);
+      }
       const resizedVideoBitmap = await createImageBitmap(
         frame, {resizeWidth: this.segmentationWidth_, resizeHeight: this.segmentationHeight_});
       resultTensor = tf.tidy(() => {

@@ -380,9 +380,6 @@ const batch = [4, 4];
       new Uint32Array([settings.filterSize, blockDim])
     );
 
-    this.deeplab_ = new DeepLabV3MNV2Nchw()
-    await this.deeplab_.init(this.device_);
-
     console.log(
         '[WebGPUBackgroundBlurTransform] WebGPU initialized.', `${this.debugPath_}.canvas_ =`,
         this.canvas_, `${this.debugPath_}.device_ =`, this.device_);
@@ -420,7 +417,7 @@ const batch = [4, 4];
   async transform(frame, controller) {
     const device = this.device_;
     const canvas = this.canvas_;
-    if (!device || !canvas || !this.deeplab_) {
+    if (!device || !canvas) {
       frame.close();
       return;
     }
@@ -612,6 +609,11 @@ const batch = [4, 4];
         Math.ceil(this.segmentationWidth_ / 8),
         Math.ceil(this.segmentationHeight_ / 8)
       );
+
+      if (!this.deeplab_) {
+        this.deeplab_ = new DeepLabV3MNV2Nchw()
+        await this.deeplab_.init(this.device_);
+      }
 
       this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
 
