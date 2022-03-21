@@ -125,7 +125,7 @@ class DeepLabV3MNV2Nchw {
       alert(
         'Failed to detect WebNN. Check that WebNN is supported ' +
         'by your browser and hardware.');
-      throw new Error('Failed to detect WebNN');
+      return false;
     }
     const context = navigator.ml.createContext(this.device_);
     this.builder_ = new MLGraphBuilder(context);
@@ -189,6 +189,7 @@ class DeepLabV3MNV2Nchw {
         resample1, {sizes: [513, 513], mode: 'linear'});
     const argmax = this.builder_.reduceArgMax(resample2, {axes: [1], keepDimensions: false});
     this.graph_ = this.builder_.build({'output': argmax});
+    return true;
   }
 
   async compute(inputGPUBuffer, outputGPUBuffer) {

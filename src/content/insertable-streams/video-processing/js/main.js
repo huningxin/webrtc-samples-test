@@ -218,6 +218,13 @@ function initUI() {
         transformSelector.options[transformSelector.selectedIndex].value;
     if (transformType.indexOf('blur') !== -1) {
       segmentBackgroundSpan.style.display = "inline";
+      const segmentBackend = (/** @type {!HTMLElement} */ (
+        document.getElementById('segmentBackend')));
+      if (transformType === 'webgl-background-blur') {
+        segmentBackend.innerHTML = 'Segment background by TF.js WebGL backend: ';
+      } else if (transformType === 'webgpu-background-blur') {
+        segmentBackend.innerHTML = 'Segment background by WebNN: ';
+      }
     } else {
       segmentBackgroundSpan.style.display = "none";
     }

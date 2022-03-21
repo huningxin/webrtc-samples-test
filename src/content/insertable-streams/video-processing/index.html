@@ -59,7 +59,7 @@
         <span>Transform:</span>
         <select id="transformSelector" disabled>
             <option selected value="webgl-background-blur">WebGL blur</option>
-            <option value="webgpu-background-blur">WebGPU/WebNN blur</option>
+            <option value="webgpu-background-blur">WebGPU blur</option>
             <option value="webgl">WebGL wrap</option>
             <option value="canvas2d">Canvas2D</option>
             <option value="noop">Do nothing</option>
@@ -67,7 +67,7 @@
             <option value="delay">Delay all frames by 100ms</option>
             <option value="webcodec">Run frames through WebCodec</option>
         </select>
-        <span id="segmentBackgroundSpan">Segment background by DeepLabV3: <input type="checkbox" id="segmentBackground"></span>
+        <span id="segmentBackgroundSpan"><span id="segmentBackend">Segment background: </span><input type="checkbox" id="segmentBackground"></span>
     </div>
     <div class="box">
         <span>Destination:</span>

@@ -545,7 +545,16 @@ const batch = [4, 4];
       );
     }
 
-    if (isSegmentBackground) {
+    if (isSegmentBackground && !this.deeplab_) {
+      this.deeplab_ = new DeepLabV3MNV2Nchw()
+      const success = await this.deeplab_.init(this.device_);
+      if (!success) {
+        this.deeplab_ = null;
+        this.blurBackgroundCheckbox_.checked = false;
+      }
+    }
+
+    if (isSegmentBackground && this.deeplab_) {
       const resizedVideoBitmap = await createImageBitmap(
         frame, {resizeWidth: this.segmentationWidth_, resizeHeight: this.segmentationHeight_});
       device.queue.copyExternalImageToTexture(
@@ -609,11 +618,6 @@ const batch = [4, 4];
         Math.ceil(this.segmentationWidth_ / 8),
         Math.ceil(this.segmentationHeight_ / 8)
       );
-
-      if (!this.deeplab_) {
-        this.deeplab_ = new DeepLabV3MNV2Nchw()
-        await this.deeplab_.init(this.device_);
-      }
 
       this.deeplab_.compute(this.inputTensorBuffer_, this.segmapBuffer_);
 
