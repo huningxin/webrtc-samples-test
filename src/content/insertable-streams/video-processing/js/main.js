@@ -141,6 +141,8 @@ function initUI() {
     document.getElementById('sourceSelector'));
   const sourceVisibleCheckbox = (/** @type {!HTMLInputElement} */ (
     document.getElementById('sourceVisible')));
+  const segmentBackgroundSpan = (/** @type {!HTMLElement} */ (
+    document.getElementById('segmentBackgroundSpan')));
   /**
    * Updates the pipeline based on the current settings of the sourceSelector
    * and sourceVisible UI elements. Unlike updatePipelineSource(), never
@@ -212,11 +214,18 @@ function initUI() {
    * UI element.
    */
   function updatePipelineTransform() {
+    const transformType =
+        transformSelector.options[transformSelector.selectedIndex].value;
+    if (transformType.indexOf('blur') !== -1) {
+      segmentBackgroundSpan.style.display = "inline";
+    } else {
+      segmentBackgroundSpan.style.display = "none";
+    }
+
     if (!pipeline) {
       return;
     }
-    const transformType =
-        transformSelector.options[transformSelector.selectedIndex].value;
+
     console.log(`[UI] Selected transform: ${transformType}`);
     switch (transformType) {
       case 'webgl':
@@ -254,6 +263,7 @@ function initUI() {
   }
   transformSelector.oninput = updatePipelineTransform;
   transformSelector.disabled = false;
+  updatePipelineTransform();
 
   const sinkSelector = (/** @type {!HTMLSelectElement} */ (
     document.getElementById('sinkSelector')));

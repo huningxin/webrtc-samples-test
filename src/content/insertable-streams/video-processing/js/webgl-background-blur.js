@@ -50,7 +50,7 @@ class WebGLBackgroundBlurTransform { // eslint-disable-line no-unused-vars
     this.deeplab_ = null;
 
     this.blurBackgroundCheckbox_ = (/** @type {!HTMLInputElement} */ (
-      document.getElementById('blurBackground')));
+      document.getElementById('segmentBackground')));
   }
   /** @override */
   async init() {

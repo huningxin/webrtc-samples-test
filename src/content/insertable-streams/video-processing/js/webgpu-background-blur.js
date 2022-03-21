@@ -212,7 +212,7 @@ const batch = [4, 4];
     this.deeplab_ = null;
 
     this.blurBackgroundCheckbox_ = (/** @type {!HTMLInputElement} */ (
-      document.getElementById('blurBackground')));
+      document.getElementById('segmentBackground')));
   }
 
   /** @override */
